@@ -9,9 +9,9 @@ RUN DIST_PY=$(ls /usr/bin/python3.[0-9]* | sort -V | head -n1) && \
     # can restore it later; otherwise, we will restore to CUSTOM_PY when we \
     # are done. \
     if update-alternatives --query python3 >/dev/null 2>&1; then \
-        ORIGINAL_PY=$(update-alternatives --query python3 | awk -F": " '/Value:/ {print $2}'); \
+    ORIGINAL_PY=$(update-alternatives --query python3 | awk -F": " '/Value:/ {print $2}'); \
     else \
-        ORIGINAL_PY=$CUSTOM_PY; \
+    ORIGINAL_PY=$CUSTOM_PY; \
     fi && \
     # ---- APT operations that require the distro python3 ------------------- \
     echo "Temporarily switching python3 alternative to ${DIST_PY} so that APT scripts use the distro‑built Python runtime." && \
@@ -24,15 +24,15 @@ RUN DIST_PY=$(ls /usr/bin/python3.[0-9]* | sort -V | head -n1) && \
     # Pre‑seed the Microsoft Core Fonts EULA so the build is non‑interactive \
     echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | debconf-set-selections && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        python3-apt \
-        update-notifier-common \
-        poppler-utils \
-        fonts-crosextra-caladea \
-        fonts-crosextra-carlito \
-        gsfonts \
-        lcdf-typetools \
-        ttf-mscorefonts-installer \
-        git git-lfs curl wget unzip && \
+    python3-apt \
+    update-notifier-common \
+    poppler-utils \
+    fonts-crosextra-caladea \
+    fonts-crosextra-carlito \
+    gsfonts \
+    lcdf-typetools \
+    ttf-mscorefonts-installer \
+    git git-lfs curl wget unzip && \
     # ---- Restore the original / custom Python alternative ----------------- \
     echo "Restoring python3 alternative to ${ORIGINAL_PY}" && \
     update-alternatives --install /usr/bin/python3 python3 ${ORIGINAL_PY} 1 && \
@@ -54,3 +54,20 @@ RUN playwright install-deps
 RUN playwright install chromium
 
 RUN python3 -m olmocr.pipeline --help
+
+# API runtime deps installed explicitly (avoid editing pyproject)
+RUN uv pip install --system --no-cache fastapi uvicorn[standard] python-multipart
+
+# Ensure default workspace exists
+RUN mkdir -p /workspace
+
+# Expose API port
+EXPOSE 8000
+
+# Healthcheck for API
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=10 \
+    CMD curl -fsS http://localhost:${API_PORT:-8000}/health || exit 1
+
+# Default command: run the FastAPI app
+ENV API_PORT=8000
+CMD uvicorn olmocr.api:app --host 0.0.0.0 --port ${API_PORT}

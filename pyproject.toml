@@ -50,6 +50,12 @@ Changelog = "https://github.com/allenai/olmocr/blob/main/CHANGELOG.md"
 # Documentation = "https://olmocr.readthedocs.io/"
 
 [project.optional-dependencies]
+api = [
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+]
+
 gpu = [
     "vllm==0.11.0"
 ]
@@ -191,4 +197,15 @@ log_format = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
 log_level = "DEBUG"
 markers = [
     "nonci: mark test as not intended for CI runs"
+]
+
+[dependency-groups]
+dev = [
+    "einops>=0.8.1",
+    "fuzzysearch>=0.8.0",
+    "lark>=1.2.2",
+    "playwright>=1.55.0",
+    "rapidfuzz>=3.14.1",
+    "tensorflow>=2.20.0",
+    "torchvision>=0.23.0",
 ]
