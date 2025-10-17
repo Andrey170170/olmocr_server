@@ -75,28 +75,24 @@ async def process_pdf_bytes(args: SimpleNamespace, file_bytes: bytes, filename: 
 
     Persists nothing; callers decide how to persist single vs batch writes.
     """
-    # Write incoming bytes to a temp file so we can reuse pipeline utilities
-    with tempfile.NamedTemporaryFile("wb+", suffix=".bin", delete=False) as tf:
+    # Write incoming bytes to a temp file path so we can reuse pipeline utilities
+    with tempfile.NamedTemporaryFile("wb+", suffix=".pdf", delete=False) as tf:
         tf.write(file_bytes)
         tf.flush()
+        bin_path = tf.name
 
     local_pdf_path = None
     try:
         # Convert images to PDF if needed
-        if is_png(tf.name) or is_jpeg(tf.name):
-            pdf_bytes = convert_image_to_pdf_bytes(tf.name)
+        if is_png(bin_path) or is_jpeg(bin_path):
+            pdf_bytes = convert_image_to_pdf_bytes(bin_path)
             with tempfile.NamedTemporaryFile("wb+", suffix=".pdf", delete=False) as pdf_tf:
                 pdf_tf.write(pdf_bytes)
                 pdf_tf.flush()
                 local_pdf_path = pdf_tf.name
         else:
-            # Assume it's already a PDF
-            with tempfile.NamedTemporaryFile("wb+", suffix=".pdf", delete=False) as pdf_tf:
-                # Just rewrite content with .pdf suffix for clarity
-                tf.seek(0)
-                pdf_tf.write(tf.read())
-                pdf_tf.flush()
-                local_pdf_path = pdf_tf.name
+            # Already a PDF; reuse the written path
+            local_pdf_path = bin_path
 
         # Count pages
         try:
@@ -128,11 +124,13 @@ async def process_pdf_bytes(args: SimpleNamespace, file_bytes: bytes, filename: 
             pipeline.logger.exception(f"Exception in process_pdf_bytes for {filename}: {ex}")
             return None
     finally:
-        try:
-            if os.path.exists(tf.name):
-                os.unlink(tf.name)
-        except Exception:
-            pass
+        # Remove the original uploaded temp if we didn't already set local_pdf_path to it
+        if bin_path and local_pdf_path != bin_path:
+            try:
+                if os.path.exists(bin_path):
+                    os.unlink(bin_path)
+            except Exception:
+                pass
         if local_pdf_path:
             try:
                 if os.path.exists(local_pdf_path):

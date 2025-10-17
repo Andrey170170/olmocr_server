@@ -70,4 +70,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=10 \
 
 # Default command: run the FastAPI app
 ENV API_PORT=8000
-CMD uvicorn olmocr.api:app --host 0.0.0.0 --port ${API_PORT}
+# Override upstream ENTRYPOINT so our CMD isn't treated as args to their CLI
+ENTRYPOINT []
+# Use bash -lc so ${API_PORT} expands at runtime
+CMD ["bash","-lc","uvicorn olmocr.api:app --host 0.0.0.0 --port ${API_PORT}"]
