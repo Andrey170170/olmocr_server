@@ -1,0 +1,25 @@
+services:
+  olmocr-api:
+    build: .
+    image: olmocr-api:latest
+    ports:
+      - "8000:8000"
+    environment:
+      OLMOCR_MODEL: allenai/olmOCR-7B-0825-FP8
+      OLMOCR_GPU_MEMORY_UTILIZATION: "0.80"
+      OLMOCR_MAX_MODEL_LEN: "16384"
+      OLMOCR_TARGET_IMAGE_DIM: "1288"
+      OLMOCR_MAX_PAGE_RETRIES: "8"
+      OLMOCR_MAX_PAGE_ERROR_RATE: "0.004"
+      OLMOCR_GUIDED_DECODING: "false"
+      OLMOCR_WORKSPACE: "/workspace"
+      # OLMOCR_SERVER: http://vllm:8000
+      # OLMOCR_API_KEY: secret
+      API_PORT: "8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    volumes:
+      - ./workspace:/workspace
