@@ -65,6 +65,8 @@ async def process(file: UploadFile = File(...)):
         raise HTTPException(status_code=503, detail="Initializing")
 
     args = load_args_from_env()
+    args.server = f"http://localhost:{args.port}/v1"
+    args.model = "olmocr"
     data = await file.read()
     filename = file.filename or "upload.bin"
     doc = await process_pdf_bytes(args, data, filename)
@@ -87,6 +89,8 @@ async def process_batch(files: List[UploadFile] = File(...)):
         raise HTTPException(status_code=503, detail="Initializing")
 
     args = load_args_from_env()
+    args.server = f"http://localhost:{args.port}/v1"
+    args.model = "olmocr"
     # Read all files first
     filenames = [(f.filename or "upload.bin") for f in files]
     file_datas = [await f.read() for f in files]

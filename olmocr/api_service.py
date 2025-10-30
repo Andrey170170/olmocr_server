@@ -26,11 +26,13 @@ def load_args_from_env() -> SimpleNamespace:
         v = os.environ.get(name)
         return int(v) if v not in (None, "") else default
 
+    port = int(os.environ.get("OLMOCR_PORT", "30024"))
+
     return SimpleNamespace(
         # Inference server selection
         server=getenv_str("OLMOCR_SERVER"),
         api_key=getenv_str("OLMOCR_API_KEY"),
-        model=getenv_str("OLMOCR_MODEL", "allenai/olmOCR-7B-0825-FP8"),
+        model=getenv_str("OLMOCR_MODEL", "allenai/olmOCR-7B-1025-FP8"),
         # Local vLLM server knobs
         gpu_memory_utilization=getenv_float("OLMOCR_GPU_MEMORY_UTILIZATION", None),
         max_model_len=getenv_int("OLMOCR_MAX_MODEL_LEN", 16384),
@@ -45,7 +47,7 @@ def load_args_from_env() -> SimpleNamespace:
         workspace=getenv_str("OLMOCR_WORKSPACE", "/workspace"),
         markdown=os.environ.get("OLMOCR_MARKDOWN", "false").lower() == "true",
         # Server port used by local vLLM
-        port=int(os.environ.get("OLMOCR_PORT", "30024")),
+        port=port,
     )
 
 
