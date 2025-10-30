@@ -49,15 +49,11 @@ def load_args_from_env() -> SimpleNamespace:
     )
 
 
-def set_pipeline_base_port_from_args(args: SimpleNamespace) -> None:
-    """Set the pipeline's BASE_SERVER_PORT global based on args.port."""
-    pipeline.BASE_SERVER_PORT = args.port
-
-
 async def start_local_vllm_and_wait(args: SimpleNamespace) -> Tuple[asyncio.Task, asyncio.Semaphore]:
     """Download model if needed, start local vLLM server, wait for readiness, return (task, semaphore)."""
-    set_pipeline_base_port_from_args(args)
     model_path_or_name = await pipeline.download_model(args.model)
+    args.server = f"http://localhost:{args.port}/v1"
+    args.model = "olmocr"  # Internal server always uses this name for the model, for supporting weird local model paths
     semaphore = asyncio.Semaphore(1)
     task = asyncio.create_task(pipeline.vllm_server_host(model_path_or_name, args, semaphore))
     await pipeline.vllm_server_ready(args)
