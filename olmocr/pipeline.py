@@ -38,7 +38,7 @@ from olmocr.data.renderpdf import render_pdf_to_base64png
 from olmocr.filter.filter import Language, PdfFilter
 from olmocr.image_utils import convert_image_to_pdf_bytes, is_jpeg, is_png
 from olmocr.metrics import MetricsKeeper, WorkerTracker
-from olmocr.prompts import PageResponse, build_no_anchoring_yaml_prompt
+from olmocr.prompts import PageResponse, build_no_anchoring_v4_yaml_prompt
 from olmocr.prompts.anchor import get_anchor_text
 from olmocr.s3_utils import (
     download_directory,
@@ -90,9 +90,6 @@ pdf_render_max_workers = asyncio.BoundedSemaphore(int(float(os.environ.get("BEAK
 # Filter object, cached so it will only get loaded when/if you need it
 get_pdf_filter = cache(lambda: PdfFilter(languages_to_keep={Language.ENGLISH, None}, apply_download_spam_check=True, apply_form_check=True))
 
-# Specify a default port, but it can be overridden by args
-BASE_SERVER_PORT = 30024
-
 
 @dataclass(frozen=True)
 class PageResult:
@@ -106,7 +103,7 @@ class PageResult:
 
 
 async def build_page_query(local_pdf_path: str, page: int, target_longest_image_dim: int, image_rotation: int = 0, model_name: str = "olmocr") -> dict:
-    MAX_TOKENS = 4500
+    MAX_TOKENS = 8000
     assert image_rotation in [0, 90, 180, 270], "Invalid image rotation provided in build_page_query"
 
     # Allow the page rendering to process in the background, but limit the number of workers otherwise you can overload the system
@@ -138,7 +135,7 @@ async def build_page_query(local_pdf_path: str, page: int, target_longest_image_
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": build_no_anchoring_yaml_prompt()},
+                    {"type": "text", "text": build_no_anchoring_v4_yaml_prompt()},
                     {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_base64}"}},
                 ],
             }
@@ -211,8 +208,29 @@ async def apost(url, json_data, api_key=None):
         if "content-length" in headers:
             body_length = int(headers["content-length"])
             response_body = await reader.readexactly(body_length)
+        elif headers.get("transfer-encoding", "") == "chunked":
+            chunks = []
+            while True:
+                # Read chunk size line
+                size_line = await reader.readline()
+                chunk_size = int(size_line.strip(), 16)  # Hex format
+
+                if chunk_size == 0:
+                    await reader.readline()  # Read final CRLF
+                    break
+
+                chunk_data = await reader.readexactly(chunk_size)
+                chunks.append(chunk_data)
+
+                # Read trailing CRLF after chunk data
+                await reader.readline()
+
+            response_body = b"".join(chunks)
+        elif headers.get("connection", "") == "close":
+            # Read until connection closes
+            response_body = await reader.read()
         else:
-            raise ConnectionError("Anything other than fixed content length responses are not implemented yet")
+            raise ConnectionError("Cannot determine response body length")
 
         return status_code, response_body
     except Exception as e:
@@ -229,16 +247,7 @@ async def apost(url, json_data, api_key=None):
 
 
 async def process_page(args, worker_id: int, pdf_orig_path: str, pdf_local_path: str, page_num: int) -> PageResult:
-    if args.server:
-        server_url = args.server.rstrip("/")
-        # Check if the server URL already contains '/v1/openai' (DeepInfra case)
-        if "/v1/openai" in server_url:
-            COMPLETION_URL = f"{server_url}/chat/completions"
-        else:
-            COMPLETION_URL = f"{server_url}/v1/chat/completions"
-        logger.debug(f"Using completion URL: {COMPLETION_URL}")
-    else:
-        COMPLETION_URL = f"http://localhost:{BASE_SERVER_PORT}/v1/chat/completions"
+    COMPLETION_URL = f"{args.server.rstrip('/')}/chat/completions"
     MAX_RETRIES = args.max_page_retries
     MODEL_MAX_CONTEXT = 16384
     TEMPERATURE_BY_ATTEMPT = [0.1, 0.1, 0.2, 0.3, 0.5, 0.8, 0.9, 1.0]
@@ -249,19 +258,13 @@ async def process_page(args, worker_id: int, pdf_orig_path: str, pdf_local_path:
 
     while attempt < MAX_RETRIES:
         lookup_attempt = min(attempt, len(TEMPERATURE_BY_ATTEMPT) - 1)
-        # For external servers (like DeepInfra), use the model name from args
-        # For local inference, always use 'olmocr'
-        if args.server and hasattr(args, "model"):
-            model_name = args.model
-        else:
-            model_name = "olmocr"
 
         query = await build_page_query(
             pdf_local_path,
             page_num,
             args.target_longest_image_dim,
             image_rotation=cumulative_rotation,
-            model_name=model_name,
+            model_name=args.model,
         )
         # Change temperature as number of attempts increases to overcome repetition issues at expense of quality
         query["temperature"] = TEMPERATURE_BY_ATTEMPT[lookup_attempt]
@@ -626,7 +629,7 @@ async def vllm_server_task(model_name_or_path, args, semaphore, unknown_args=Non
         "serve",
         model_name_or_path,
         "--port",
-        str(BASE_SERVER_PORT),
+        str(args.port),
         "--disable-log-requests",
         "--uvicorn-log-level",
         "warning",
@@ -720,7 +723,7 @@ async def vllm_server_task(model_name_or_path, args, semaphore, unknown_args=Non
                 # Check if we should release the semaphore
                 should_release = (
                     server_printed_ready_message
-                    and last_queue_req <= int(peak_running_req * 0.1)
+                    and last_queue_req <= int(peak_running_req * 0.2)
                     and time.time() - last_semaphore_release > 30
                     and semaphore.locked()
                     and (last_running_req == 0 or running_reqs_decreased)
@@ -775,15 +778,7 @@ async def vllm_server_host(model_name_or_path, args, semaphore, unknown_args=Non
 async def vllm_server_ready(args):
     max_attempts = 300
     delay_sec = 1
-    if args.server:
-        # Check if the server URL already contains '/v1/openai' (DeepInfra case)
-        server_url = args.server.rstrip("/")
-        if "/v1/openai" in server_url:
-            url = f"{server_url}/models"
-        else:
-            url = f"{server_url}/v1/models"
-    else:
-        url = f"http://localhost:{BASE_SERVER_PORT}/v1/models"
+    url = f"{args.server.rstrip('/')}/models"
 
     for attempt in range(1, max_attempts + 1):
         try:
@@ -1094,25 +1089,31 @@ async def main():
     )
     parser.add_argument(
         "--model",
-        help="Path where the model is located, allenai/olmOCR-7B-0825-FP8 is the default, can be local, s3, or hugging face.",
-        default="allenai/olmOCR-7B-0825-FP8",
+        help="Path where the model is located, allenai/olmOCR-2-7B-1025-FP8 is the default, can be local, s3, or hugging face.",
+        default="allenai/olmOCR-2-7B-1025-FP8",
     )
 
     # More detailed config options, usually you shouldn't have to change these
     parser.add_argument("--workspace_profile", help="S3 configuration profile for accessing the workspace", default=None)
     parser.add_argument("--pdf_profile", help="S3 configuration profile for accessing the raw pdf documents", default=None)
-    parser.add_argument("--pages_per_group", type=int, default=500, help="Aiming for this many pdf pages per work item group")
+    parser.add_argument("--pages_per_group", type=int, default=argparse.SUPPRESS, help="Aiming for this many pdf pages per work item group")
     parser.add_argument("--max_page_retries", type=int, default=8, help="Max number of times we will retry rendering a page")
     parser.add_argument("--max_page_error_rate", type=float, default=0.004, help="Rate of allowable failed pages in a document, 1/250 by default")
     parser.add_argument("--workers", type=int, default=20, help="Number of workers to run at a time")
     parser.add_argument("--apply_filter", action="store_true", help="Apply basic filtering to English pdfs which are not forms, and not likely seo spam")
     parser.add_argument("--stats", action="store_true", help="Instead of running any job, reports some statistics about the current workspace")
     parser.add_argument("--markdown", action="store_true", help="Also write natural text to markdown files preserving the folder structure of the input pdfs")
-
     parser.add_argument("--target_longest_image_dim", type=int, help="Dimension on longest side to use for rendering the pdf pages", default=1288)
     parser.add_argument("--target_anchor_text_len", type=int, help="Maximum amount of anchor text to use (characters), not used for new models", default=-1)
     parser.add_argument("--guided_decoding", action="store_true", help="Enable guided decoding for model YAML type outputs")
-    parser.add_argument("--api_key", type=str, default=None, help="API key for authenticated remote servers (e.g., DeepInfra)")
+
+    server_group = parser.add_argument_group("Server arguments, to specify where your VLLM inference engine is running")
+    server_group.add_argument(
+        "--server",
+        type=str,
+        help="URL of external vLLM (or other compatible provider) server (e.g., http://hostname:port/v1). If provided, skips spawning local vLLM instance",
+    )
+    server_group.add_argument("--api_key", type=str, default=None, help="API key for authenticated remote servers (e.g., DeepInfra)")
 
     vllm_group = parser.add_argument_group(
         "VLLM arguments", "These arguments are passed to vLLM. Any unrecognized arguments are also automatically forwarded to vLLM."
@@ -1124,11 +1125,6 @@ async def main():
     vllm_group.add_argument("--tensor-parallel-size", "-tp", type=int, default=1, help="Tensor parallel size for vLLM")
     vllm_group.add_argument("--data-parallel-size", "-dp", type=int, default=1, help="Data parallel size for vLLM")
     vllm_group.add_argument("--port", type=int, default=30024, help="Port to use for the VLLM server")
-    vllm_group.add_argument(
-        "--server",
-        type=str,
-        help="URL of external vLLM (or other compatible provider) server (e.g., http://hostname:port). If provided, skips spawning local vLLM instance",
-    )
 
     # Beaker/job running stuff
     beaker_group = parser.add_argument_group("beaker/cluster execution")
@@ -1137,7 +1133,7 @@ async def main():
     beaker_group.add_argument(
         "--beaker_cluster",
         help="Beaker clusters you want to run on",
-        default=["ai2/jupiter-cirrascale-2", "ai2/ceres-cirrascale", "ai2/neptune-cirrascale", "ai2/saturn-cirrascale", "ai2/augusta-google-1"],
+        default=["ai2/jupiter", "ai2/ceres", "ai2/neptune", "ai2/saturn"],
     )
     beaker_group.add_argument("--beaker_gpus", type=int, default=1, help="Number of gpu replicas to run")
     beaker_group.add_argument("--beaker_priority", type=str, default="normal", help="Beaker priority level for the job")
@@ -1148,10 +1144,8 @@ async def main():
         "If you run out of GPU memory during start-up or get 'KV cache is larger than available memory' errors, retry with lower values, e.g. --gpu_memory_utilization 0.80  --max_model_len 16384"
     )
 
+    use_internal_server = not args.server
     global workspace_s3, pdf_s3
-    # set the global BASE_SERVER_PORT from args
-    global BASE_SERVER_PORT
-    BASE_SERVER_PORT = args.port
 
     # setup the job to work in beaker environment, load secrets, adjust logging, etc.
     if "BEAKER_JOB_NAME" in os.environ:
@@ -1173,6 +1167,11 @@ async def main():
         sleep_time = int(os.environ.get("BEAKER_REPLICA_RANK", "0")) * interval
         logger.info(f"Beaker job sleeping for {sleep_time} seconds to stagger model downloads")
         await asyncio.sleep(sleep_time)
+
+    # If you specify an API key, meaning you are on a remote provider, then lower the group size default, not to overwhelm such servers
+    # and not to waste money if a group doesn't finish right away
+    if not hasattr(args, "pages_per_group"):
+        args.pages_per_group = 50 if args.api_key is not None else 500
 
     if args.workspace_profile:
         workspace_session = boto3.Session(profile_name=args.workspace_profile)
@@ -1267,17 +1266,20 @@ async def main():
 
     # If you get this far, then you are doing inference and need a GPU
     # check_sglang_version()
-    if not args.server:
+    if use_internal_server:
         check_torch_gpu_available()
 
     logger.info(f"Starting pipeline with PID {os.getpid()}")
 
     # Download the model before you do anything else
-    if args.server:
+    if use_internal_server:
+        model_name_or_path = await download_model(args.model)
+        args.server = f"http://localhost:{args.port}/v1"
+        args.model = "olmocr"  # Internal server always uses this name for the model, for supporting weird local model paths
+        logger.info(f"Using internal server at {args.server}")
+    else:
         logger.info(f"Using external server at {args.server}")
         model_name_or_path = None
-    else:
-        model_name_or_path = await download_model(args.model)
 
     # Initialize the work queue
     qsize = await work_queue.initialize_queue()
@@ -1293,7 +1295,7 @@ async def main():
 
     # Start local vLLM instance if not using external one
     vllm_server = None
-    if not args.server:
+    if use_internal_server:
         vllm_server = asyncio.create_task(vllm_server_host(model_name_or_path, args, semaphore, unknown_args))
 
     await vllm_server_ready(args)

@@ -30,6 +30,7 @@ dependencies = [
   "ftfy",
   "bleach",
   "markdown2",
+  "markdownify",
   "filelock",
   "orjson",
   "requests",
@@ -38,7 +39,6 @@ dependencies = [
   "httpx",
   "torch>=2.7.0",
   "transformers==4.55.2",
-  "img2pdf",
   "beaker-py",
 ]
 license = {file = "LICENSE"}
@@ -85,6 +85,8 @@ dev = [
     "datasets",
     "omegaconf",
     "spacy",
+    "wandb",
+    "trl",
 ]
 
 bench = [
@@ -95,6 +97,7 @@ bench = [
     "syntok",
     "openai",
     "google-genai",
+    "anthropic",
     "playwright",
     "mistralai",
     "lxml",
@@ -105,6 +108,7 @@ train = [
     "torch",
     "torchvision",
     "accelerate",
+    "trl",
     "peft",
     "wandb",
     "omegaconf",
@@ -198,6 +202,7 @@ log_level = "DEBUG"
 markers = [
     "nonci: mark test as not intended for CI runs"
 ]
+addopts = "-m 'not nonci'"
 
 [dependency-groups]
 dev = [

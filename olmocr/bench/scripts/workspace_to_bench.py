@@ -68,7 +68,7 @@ def get_subdir_and_pdf_name(source_file_path):
     return None, None
 
 
-def create_markdown_files(entries, output_dir):
+def create_markdown_files(entries, output_dir, repeat_index=1):
     """Create markdown files from JSONL entries in subdir/{pdf_name}.md format."""
     output_path = Path(output_dir)
 
@@ -87,7 +87,7 @@ def create_markdown_files(entries, output_dir):
         subdir_path = output_path / subdir
         subdir_path.mkdir(parents=True, exist_ok=True)
 
-        md_filename = f"{pdf_name}_pg1_repeat1.md"
+        md_filename = f"{pdf_name}_pg1_repeat{repeat_index}.md"
         md_filepath = subdir_path / md_filename
 
         assert len(pdf_entries) == 1, "Expecting just one entry mapping to each file, otherwise something is wrong"
@@ -100,7 +100,7 @@ def create_markdown_files(entries, output_dir):
             blank_files += 1
 
         created_files.add((subdir, pdf_name))
-        print(f"Created: {subdir}/{md_filename}_pg1_repeat1")
+        print(f"Created: {subdir}/{md_filename}_pg1_repeat{repeat_index}")
 
     print(f"Created {len(created_files)} markdown files from JSONL data")
     print(f"{blank_files} of those had empty content")
@@ -143,7 +143,7 @@ def find_missing_pdfs(pdf_sources, created_files, base_bench_path):
     return missing_pdfs
 
 
-def create_blank_markdown_files(missing_pdfs, output_dir):
+def create_blank_markdown_files(missing_pdfs, output_dir, repeat_index=1):
     """Create blank markdown files for missing PDFs in subdir/{pdf_name}.md format."""
     output_path = Path(output_dir)
 
@@ -154,7 +154,7 @@ def create_blank_markdown_files(missing_pdfs, output_dir):
         subdir_path = output_path / subdir
         subdir_path.mkdir(parents=True, exist_ok=True)
 
-        md_filename = f"{pdf_name}_pg1_repeat1.md"
+        md_filename = f"{pdf_name}_pg1_repeat{repeat_index}.md"
         md_filepath = subdir_path / md_filename
 
         content = ""
@@ -162,7 +162,7 @@ def create_blank_markdown_files(missing_pdfs, output_dir):
         with open(md_filepath, "w", encoding="utf-8") as f:
             f.write(content)
 
-        print(f"Created blank: {subdir}/{md_filename}_pg1_repeat1")
+        print(f"Created blank: {subdir}/{md_filename}_pg1_repeat{repeat_index}")
 
     print(f"Created {len(missing_pdfs)} blank markdown files for missing PDFs")
 
@@ -172,6 +172,9 @@ def main():
     parser.add_argument("workspace_dir", help="Your workspace directory")
     parser.add_argument("output_dir", nargs="?", default="./markdown_output", help="Output directory for markdown files (default: ./markdown_output)")
     parser.add_argument("--bench-path", default="../olmOCR-bench", help="Path to olmOCR-bench directory (default: ../olmOCR-bench)")
+    parser.add_argument(
+        "--repeat-index", default=1, type=int, help="If you want to run multiple workspaces as different repeats to get a better average, set this"
+    )
 
     args = parser.parse_args()
     input_dir = args.workspace_dir + "/results"

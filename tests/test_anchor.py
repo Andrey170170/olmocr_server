@@ -165,16 +165,8 @@ class AnchorTest(unittest.TestCase):
         temp_img.write(base64.b64decode(base64_png))
         temp_img.close()
 
-        # Convert all images to a single PDF using our enhanced function
-        pdf_bytes = convert_image_to_pdf_bytes([temp_img.name])
-
-        # Write the PDF bytes to a temporary file
-        temp_pdf = tempfile.NamedTemporaryFile("wb", suffix=".pdf", delete=False)
-        temp_pdf.write(pdf_bytes)
-        temp_pdf.close()
-
         # Update pdf_path to the new file
-        img_pdf_path = temp_pdf.name
+        img_pdf_path = os.path.join(os.path.dirname(__file__), "gnarly_pdfs", "edgar_image.pdf")
 
         image_only_anchor = get_anchor_text(img_pdf_path, 1, pdf_engine="pdfreport")
         print(image_only_anchor)

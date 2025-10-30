@@ -1,47 +1,74 @@
 #!/bin/bash
 
 # Runs an olmocr-bench run using the full pipeline (no fallback)
-#  Without model parameter (default behavior):, uses the default image from hugging face
+#  Without model parameter (default behavior): uses the default image from hugging face
 #   ./scripts/run_benchmark.sh
 #  With model parameter: for testing custom models
 #   ./scripts/run_benchmark.sh --model your-model-name
+#  With cluster parameter: specify a specific cluster to use
+#   ./scripts/run_benchmark.sh --cluster ai2/titan-cirrascale
+#  With beaker image: skip Docker build and use provided Beaker image
+#   ./scripts/run_benchmark.sh --beaker-image jakep/olmocr-benchmark-0.3.3-780bc7d934
+#  With repeats parameter: run the pipeline multiple times for increased accuracy (default: 1)
+#   ./scripts/run_benchmark.sh --repeats 3
+#  With noperf flag: skip the performance test job
+#   ./scripts/run_benchmark.sh --noperf
 
 set -e
 
 # Parse command line arguments
 MODEL=""
-B200_MODE=""
+CLUSTER=""
 BENCH_BRANCH=""
+BEAKER_IMAGE=""
+REPEATS="1"
+NOPERF=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --model)
             MODEL="$2"
             shift 2
             ;;
-        --b200)
-            B200_MODE="true"
-            shift
+        --cluster)
+            CLUSTER="$2"
+            shift 2
             ;;
         --benchbranch)
             BENCH_BRANCH="$2"
             shift 2
             ;;
+        --beaker-image)
+            BEAKER_IMAGE="$2"
+            shift 2
+            ;;
+        --repeats)
+            REPEATS="$2"
+            shift 2
+            ;;
+        --noperf)
+            NOPERF="1"
+            shift
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--model MODEL_NAME] [--b200] [--benchbranch BRANCH_NAME]"
+            echo "Usage: $0 [--model MODEL_NAME] [--cluster CLUSTER_NAME] [--benchbranch BRANCH_NAME] [--beaker-image IMAGE_NAME] [--repeats NUMBER] [--noperf]"
             exit 1
             ;;
     esac
 done
 
 # Check for uncommitted changes
-if ! git diff-index --quiet HEAD --; then
-    echo "Error: There are uncommitted changes in the repository."
-    echo "Please commit or stash your changes before running the benchmark."
-    echo ""
-    echo "Uncommitted changes:"
-    git status --short
-    exit 1
+if [ -n "$BEAKER_IMAGE" ]; then
+ echo "Skipping docker build"
+else
+    if ! git diff-index --quiet HEAD --; then
+        echo "Error: There are uncommitted changes in the repository."
+        echo "Please commit or stash your changes before running the benchmark."
+        echo ""
+        echo "Uncommitted changes:"
+        git status --short
+        exit 1
+    fi
 fi
 
 # Use conda environment Python if available, otherwise use system Python
@@ -65,47 +92,61 @@ echo "Git hash: $GIT_HASH"
 GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 echo "Git branch: $GIT_BRANCH"
 
-# Create full image tag
-IMAGE_TAG="olmocr-benchmark-${VERSION}-${GIT_HASH}"
-echo "Building Docker image with tag: $IMAGE_TAG"
+# Check if a Beaker image was provided
+if [ -n "$BEAKER_IMAGE" ]; then
+    echo "Using provided Beaker image: $BEAKER_IMAGE"
+    IMAGE_TAG="$BEAKER_IMAGE"
+else
+    # Create full image tag
+    IMAGE_TAG="olmocr-benchmark-${VERSION}-${GIT_HASH}"
+    echo "Building Docker image with tag: $IMAGE_TAG"
 
-# Build the Docker image
-echo "Building Docker image..."
-docker build --platform linux/amd64 -f ./Dockerfile -t $IMAGE_TAG .
+    # Build the Docker image
+    echo "Building Docker image..."
+    docker build --platform linux/amd64 -f ./Dockerfile -t $IMAGE_TAG .
+
+    # Push image to beaker
+    echo "Trying to push image to Beaker..."
+    if ! beaker image create --workspace ai2/oe-data-pdf --name $IMAGE_TAG $IMAGE_TAG 2>/dev/null; then
+        echo "Warning: Beaker image with tag $IMAGE_TAG already exists. Using existing image."
+    fi
+fi
 
 # Get Beaker username
 BEAKER_USER=$(beaker account whoami --format json | jq -r '.[0].name')
 echo "Beaker user: $BEAKER_USER"
-
-# Push image to beaker
-echo "Trying to push image to Beaker..."
-if ! beaker image create --workspace ai2/oe-data-pdf --name $IMAGE_TAG $IMAGE_TAG 2>/dev/null; then
-    echo "Warning: Beaker image with tag $IMAGE_TAG already exists. Using existing image."
-fi
 
 # Create Python script to run beaker experiment
 cat << 'EOF' > /tmp/run_benchmark_experiment.py
 import sys
 from beaker import Beaker, ExperimentSpec, TaskSpec, TaskContext, ResultSpec, TaskResources, ImageSource, Priority, Constraints, EnvVar
 
-# Get image tag, beaker user, git branch, git hash, optional model, b200 mode, and bench branch from command line
+# Get image tag, beaker user, git branch, git hash, optional model, cluster, bench branch, and repeats from command line
 image_tag = sys.argv[1]
 beaker_user = sys.argv[2]
 git_branch = sys.argv[3]
 git_hash = sys.argv[4]
 model = None
-b200_mode = False
+cluster = None
 bench_branch = None
+repeats = 1
+noperf = False
 
 # Parse remaining arguments
 arg_idx = 5
 while arg_idx < len(sys.argv):
-    if sys.argv[arg_idx] == "--b200":
-        b200_mode = True
-        arg_idx += 1
+    if sys.argv[arg_idx] == "--cluster":
+        cluster = sys.argv[arg_idx + 1]
+        arg_idx += 2
     elif sys.argv[arg_idx] == "--benchbranch":
         bench_branch = sys.argv[arg_idx + 1]
         arg_idx += 2
+    elif sys.argv[arg_idx] == "--repeats":
+        repeats = int(sys.argv[arg_idx + 1])
+        arg_idx += 2
+    elif sys.argv[arg_idx] == "--noperf":
+        noperf = True
+        arg_idx += 1
     else:
         model = sys.argv[arg_idx]
         arg_idx += 1
@@ -113,10 +154,7 @@ while arg_idx < len(sys.argv):
 # Initialize Beaker client
 b = Beaker.from_env(default_workspace="ai2/olmocr")
 
-# Build the pipeline command with optional model parameter
-pipeline_cmd = "python -m olmocr.pipeline ./localworkspace --markdown --pdfs ./olmOCR-bench/bench_data/pdfs/**/*.pdf"
-if model:
-    pipeline_cmd += f" --model {model}"
+# Note: pipeline commands will be built in the loop based on repeats
 
 # Check if AWS credentials secret exists
 aws_creds_secret = f"{beaker_user}-AWS_CREDENTIALS_FILE"
@@ -145,17 +183,44 @@ if bench_branch:
 commands.extend([
     git_clone_cmd,
     "cd olmOCR-bench && git lfs pull && cd ..",
-    pipeline_cmd,
-    "python olmocr/bench/scripts/workspace_to_bench.py localworkspace/ olmOCR-bench/bench_data/olmocr --bench-path ./olmOCR-bench/",
-    "pip install s5cmd",
-    "s5cmd cp localworkspace/ s3://ai2-oe-data/jakep/olmocr-bench-runs/$BEAKER_WORKLOAD_ID/",
-    "python -m olmocr.bench.benchmark --dir ./olmOCR-bench/bench_data"
 ])
 
+# Run pipeline multiple times based on repeats
+for i in range(1, repeats + 1):
+    workspace_dir = f"./localworkspace{i}"
+    pipeline_cmd = f"python -m olmocr.pipeline {workspace_dir} --markdown --pdfs ./olmOCR-bench/bench_data/pdfs/**/*.pdf"
+    if model:
+        pipeline_cmd += f" --model {model}"
+    commands.append(pipeline_cmd)
+
+# Process all workspaces with workspace_to_bench.py
+for i in range(1, repeats + 1):
+    workspace_dir = f"localworkspace{i}/"
+    workspace_to_bench_cmd = f"python olmocr/bench/scripts/workspace_to_bench.py {workspace_dir} olmOCR-bench/bench_data/olmocr --bench-path ./olmOCR-bench/ --repeat-index {i}"
+    commands.append(workspace_to_bench_cmd)
+
+# Copy all workspaces to S3 and run benchmark
+commands.extend([
+    "pip install s5cmd",
+])
+
+# Copy each workspace to S3
+for i in range(1, repeats + 1):
+    workspace_dir = f"localworkspace{i}/"
+    commands.append(f"s5cmd cp {workspace_dir} s3://ai2-oe-data/jakep/olmocr-bench-runs/$BEAKER_WORKLOAD_ID/workspace{i}/")
+
+commands.append("python -m olmocr.bench.benchmark --dir ./olmOCR-bench/bench_data")
+
 # Build task spec with optional env vars
+# If image_tag contains '/', it's already a full beaker image reference
+if '/' in image_tag:
+    image_ref = image_tag
+else:
+    image_ref = f"{beaker_user}/{image_tag}"
+
 task_spec_args = {
     "name": "olmocr-benchmark",
-    "image": ImageSource(beaker=f"{beaker_user}/{image_tag}"),
+    "image": ImageSource(beaker=image_ref),
     "command": [
         "bash", "-c",
         " && ".join(commands)
@@ -165,7 +230,7 @@ task_spec_args = {
         preemptible=True,
     ),
     "resources": TaskResources(gpu_count=1),
-    "constraints": Constraints(cluster=["ai2/titan-cirrascale"] if b200_mode else ["ai2/ceres-cirrascale", "ai2/jupiter-cirrascale-2"]),
+    "constraints": Constraints(cluster=[cluster] if cluster else ["ai2/ceres-cirrascale", "ai2/jupiter-cirrascale-2"]),
     "result": ResultSpec(path="/noop-results"),
 }
 
@@ -189,54 +254,57 @@ print(f"View at: https://beaker.org/ex/{experiment.id}")
 print("-------")
 print("")
 
-# Second experiment: Performance test job
-perf_pipeline_cmd = "python -m olmocr.pipeline ./localworkspace --markdown --pdfs s3://ai2-oe-data/jakep/olmocr/olmOCR-mix-0225/benchmark_set/*.pdf"
-if model:
-    perf_pipeline_cmd += f" --model {model}"
+# Second experiment: Performance test job (only if --noperf not specified)
+if not noperf:
+    perf_pipeline_cmd = "python -m olmocr.pipeline ./localworkspace1 --markdown --pdfs s3://ai2-oe-data/jakep/olmocr/olmOCR-mix-0225/benchmark_set/*.pdf"
+    if model:
+        perf_pipeline_cmd += f" --model {model}"
 
-perf_commands = []
-if has_aws_creds:
-    perf_commands.extend([
-        "mkdir -p ~/.aws",
-        'echo "$AWS_CREDENTIALS_FILE" > ~/.aws/credentials'
-    ])
-perf_commands.append(perf_pipeline_cmd)
+    perf_commands = []
+    if has_aws_creds:
+        perf_commands.extend([
+            "mkdir -p ~/.aws",
+            'echo "$AWS_CREDENTIALS_FILE" > ~/.aws/credentials'
+        ])
+    perf_commands.append(perf_pipeline_cmd)
 
-# Build performance task spec
-perf_task_spec_args = {
-    "name": "olmocr-performance",
-    "image": ImageSource(beaker=f"{beaker_user}/{image_tag}"),
-    "command": [
-        "bash", "-c",
-        " && ".join(perf_commands)
-    ],
-    "context": TaskContext(
-        priority=Priority.normal,
-        preemptible=True,
-    ),
-    # Need to reserve all 8 gpus for performance spec or else benchmark results can be off (1 for b200 mode)
-    "resources": TaskResources(gpu_count=1 if b200_mode else 8),
-    "constraints": Constraints(cluster=["ai2/titan-cirrascale"] if b200_mode else ["ai2/ceres-cirrascale", "ai2/jupiter-cirrascale-2"]),
-    "result": ResultSpec(path="/noop-results"),
-}
+    # Build performance task spec
+    perf_task_spec_args = {
+        "name": "olmocr-performance",
+        "image": ImageSource(beaker=image_ref),
+        "command": [
+            "bash", "-c",
+            " && ".join(perf_commands)
+        ],
+        "context": TaskContext(
+            priority=Priority.normal,
+            preemptible=True,
+        ),
+        # Need to reserve all 8 gpus for performance spec or else benchmark results can be off (1 for titan-cirrascale)
+        "resources": TaskResources(gpu_count=1 if cluster == "ai2/titan-cirrascale" else 8),
+        "constraints": Constraints(cluster=[cluster] if cluster else ["ai2/ceres-cirrascale", "ai2/jupiter-cirrascale-2"]),
+        "result": ResultSpec(path="/noop-results"),
+    }
 
-# Add env vars if AWS credentials exist
-if has_aws_creds:
-    perf_task_spec_args["env_vars"] = [
-        EnvVar(name="AWS_CREDENTIALS_FILE", secret=aws_creds_secret)
-    ]
+    # Add env vars if AWS credentials exist
+    if has_aws_creds:
+        perf_task_spec_args["env_vars"] = [
+            EnvVar(name="AWS_CREDENTIALS_FILE", secret=aws_creds_secret)
+        ]
 
-# Create performance experiment spec
-perf_experiment_spec = ExperimentSpec(
-    description=f"OlmOCR Performance Test - Branch: {git_branch}, Commit: {git_hash}",
-    budget="ai2/oe-base",
-    tasks=[TaskSpec(**perf_task_spec_args)],
-)
+    # Create performance experiment spec
+    perf_experiment_spec = ExperimentSpec(
+        description=f"OlmOCR Performance Test - Branch: {git_branch}, Commit: {git_hash}",
+        budget="ai2/oe-base",
+        tasks=[TaskSpec(**perf_task_spec_args)],
+    )
 
-# Create the performance experiment
-perf_experiment = b.experiment.create(spec=perf_experiment_spec, workspace="ai2/olmocr")
-print(f"Created performance experiment: {perf_experiment.id}")
-print(f"View at: https://beaker.org/ex/{perf_experiment.id}")
+    # Create the performance experiment
+    perf_experiment = b.experiment.create(spec=perf_experiment_spec, workspace="ai2/olmocr")
+    print(f"Created performance experiment: {perf_experiment.id}")
+    print(f"View at: https://beaker.org/ex/{perf_experiment.id}")
+else:
+    print("Skipping performance test (--noperf flag specified)")
 EOF
 
 # Run the Python script to create the experiments
@@ -250,14 +318,24 @@ if [ -n "$MODEL" ]; then
     CMD="$CMD $MODEL"
 fi
 
-if [ -n "$B200_MODE" ]; then
-    echo "Using B200 mode: ai2/titan-cirrascale cluster with 1 GPU for perf task"
-    CMD="$CMD --b200"
+if [ -n "$CLUSTER" ]; then
+    echo "Using cluster: $CLUSTER"
+    CMD="$CMD --cluster $CLUSTER"
 fi
 
 if [ -n "$BENCH_BRANCH" ]; then
     echo "Using bench branch: $BENCH_BRANCH"
     CMD="$CMD --benchbranch $BENCH_BRANCH"
+fi
+
+if [ "$REPEATS" != "1" ]; then
+    echo "Using repeats: $REPEATS"
+    CMD="$CMD --repeats $REPEATS"
+fi
+
+if [ -n "$NOPERF" ]; then
+    echo "Skipping performance tests"
+    CMD="$CMD --noperf"
 fi
 
 eval $CMD

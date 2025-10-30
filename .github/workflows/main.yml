@@ -33,7 +33,6 @@ jobs:
             run: |
               playwright install chromium
               pytest -v --color=yes  -m "not nonci" tests/
-              pytest -v --color=yes  -m "not nonci" olmocr/bench/katex/render.py
 
         include:
           - python: "3.11"
